@@ -8,47 +8,52 @@
 
 ---
 
-## Step 1 — Terminate Employee
+## Step 1 — Entry Points
 
-### 1.1 Entry Point: Change Status Modal
+There are two ways to reach the Termination Payroll wizard. Both converge at the same wizard URL and follow an identical flow from Step 2 onwards.
 
-The flow begins when a user sets an employee's status to **Terminated**.
+```
+Entry Point 1 ──┐
+                ├──► https://{host}/a/payroll/multi-company/start/termination
+Entry Point 2 ──┘      ?companyCode={companyCd}&employeeCode={employeeCd}
+```
 
-> **Screenshot:** Change Status modal — "Terminate Employee"
+---
+
+### 1.1 Entry Point 1 — Change Status Modal
+
+User sets employee status to **Terminated** with **"Paid today?" = Yes**.
+
+> When "Paid today?" is Yes, "Include in payroll?" is forced **No** and disabled.
 
 ![Change Status Modal](screenshots/step1_change_status.png)
 
----
-
-### 1.2 Business Rule — Mutual Exclusivity
-
-```
-Paid today? = Yes   ──►  Included in payroll? = No (forced & disabled)
-                          └─► Wizard launched on submit
-
-Paid today? = No    ──►  Included in payroll? = Yes/No (free choice)
-                          └─► Normal termination, no wizard
-```
-
-> "Should this employee be included in payroll?" must be **disabled** — not just defaulted — when "Paid today?" is Yes.
+On submit:
+- Employee status → **Terminated**
+- `person_hire.TermPayroll_Status_Cd` → **`InProcess`**
+- Redirect to wizard URL above
 
 ---
 
-### 1.3 On Submit
+### 1.2 Entry Point 2 — Terminated Employees Pending Payment
 
-1. Employee status set to **Terminated**
-2. `person_hire.TermPayroll_Status_Cd` → **`InProcess`**
-3. Redirect to the Termination Payroll wizard:
+Lists employees from Entry Point 1 whose check has not yet been generated (`TermPayroll_Status_Cd = InProcess`).
+
+![Entry Point 2](screenshots/step2_entry2.png)
 
 ```
-https://{host}/a/payroll/multi-company/start/termination
-  ?companyCode={companyCd}
-  &employeeCode={employeeCd}
+GET v1/company/{companyCd}/termination/employees/in-progress
 ```
+
+```json
+{ "employees": [ ... ] }
+```
+
+Select an employee → redirect to wizard URL above.
 
 | `TermPayroll_Status_Cd` | Meaning |
 |---|---|
-| `InProcess` | Wizard launched — check not yet generated |
+| `InProcess` | Wizard in progress — check not yet generated |
 | `Paid` | Termination check generated successfully |
 
 ---
@@ -62,6 +67,8 @@ Wizard progress bar:
 ```
 
 ### 2.1 Pre-flight Data Load
+
+Wizard state is **in-memory only** — if the user navigates away before completing Step 4, they must start from step 1 (Earnings) again.
 
 When the wizard URL resolves, **before any screen renders**, two calls fire in sequence:
 
@@ -292,20 +299,28 @@ POST v1/company/{companyCd}/termination/payroll
 ② Call Payroll Engine (same inputs as Step 3 — authoritative DB write)
         │
         ▼
-③ Insert → Person_CheckHistory       (check header, per check)
+③ Insert → Person_CheckHistory                      (check header, per check)
         │
         ▼
-④ Insert → Person_PayCheckStubs      (E/D/T line items, per check — mirrors PBI)
+④ Insert → EmployeeTaxConfigurationCheckHistory     (W4 format snapshot — compliance audit trail)
         │
         ▼
-⑤ Insert → Person_PaymentHistory     (labor distribution per earning, per check)
+⑤ Insert → Person_PayCheckStubs                     (E/D/T line items, per check)
         │
         ▼
-⑥ person_hire.TermPayroll_Status_Cd → Paid
+⑥ Insert → Person_PaymentHistory                    (labor distribution per earning, per check)
+        │
+        ▼
+⑦ Insert → PersonERLLDHistory                       (employer liability by cost centre — FICA match, FUTA, SUTA, ER 401k)
+        │
+        ▼
+⑧ person_hire.TermPayroll_Status_Cd → Paid
         │
         ▼
    Return check summary → Confirmation screen renders
 ```
+
+> All inserts (③–⑧) must execute within a single `TransactionScope`. Any failure rolls back the entire commit — no partial check state.
 
 **Response** — one entry per check generated:
 
@@ -328,7 +343,18 @@ POST v1/company/{companyCd}/termination/payroll
 }
 ```
 
-### 4.3 Confirmation Screen
+### 4.3 Open Questions
+
+> These items require team input before implementation.
+
+| # | Question | Context |
+|---|---|---|
+| Q1 | Does termination payroll need to write to `Person_DeductionDataPriority`? | PBI writes here when the employee has garnishment/levy priority rules. Conditional on `hasDeductions`. Confirm whether a terminated employee with active garnishments requires this snapshot. |
+| Q2 | Does termination payroll need to write to `Person_ChargesTaxOverridesArchive`? | PBI writes here when manual tax overrides were applied to the check. Conditional on `hasTaxes`. Confirm whether the On Demand check can carry tax overrides, or if system-calculated taxes are always used. |
+
+---
+
+### 4.5 Confirmation Screen
 
 > **Screenshot:** Confirmation screen
 
@@ -362,12 +388,18 @@ Read Company_PayCodes.CalculationMethod_Cd
         │
         │   → PayCalculationInputEarnings { EarningCalculationBasis = HOURLY_RATE, hours, rate }
         │
-        └── StartsWith('UnitRate') AND AutoTimesheet_Ind = 0 (Hourly punch)
+        ├── StartsWith('UnitRate') AND AutoTimesheet_Ind = 1 (Auto-timesheet)
+        │        │
+        │        ▼
+        │   Hours pulled from payroll's own timesheet records
+        │   Rate resolved from Person_PayData
+        │
+        └── StartsWith('UnitRate') AND AutoTimesheet_Ind = 0 (Hourly punch — manual T&A)
                  │
                  ▼
-            T&A MTP endpoint
+            T&A MTP endpoint  ⚠ cross-team dependency (James action item)
             GET /v1/employees/{employeeId}/termination-hours?startDate=&endDate=
-            Returns aggregated punch hours by pay code (T&A team — James action item)
+            Returns aggregated punch hours by pay code — rate resolved from Person_PayData by Payroll
 ```
 
 **Salaried path output:**
