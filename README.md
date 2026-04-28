@@ -37,6 +37,10 @@ On submit:
 
 ### 1.2 Entry Point 2 — Terminated Employees Pending Payment
 
+```
+https://{host}/a/payroll/multi-company/start/termination
+```
+
 Lists employees from Entry Point 1 whose check has not yet been generated (`TermPayroll_Status_Cd = InProcess`).
 
 ![Entry Point 2](screenshots/step2_entry2.png)
@@ -368,89 +372,38 @@ Success state — one card per check generated. Single-check = 1 card, two-check
 
 ---
 
+
 ## Appendix A — Earnings Data Source
 
-Inputs required per check: `periodStartDate`, `periodEndDate` (= last day of work for the current period).
-
-```
-Read Company_PayCodes.CalculationMethod_Cd
-        │
-        ├── NOT 'UnitRate*' (Salaried)
-        │        │
-        │        ▼
-        │   BusinessDaysCalculator.CalculateRegularHoursWorked()
-        │     · PayPeriod.StartDate = periodStartDate
-        │     · PayPeriod.EndDate   = periodEndDate (lastDayOfWork)
-        │     · Prorates NormalHoursWorkedPerPayPeriod by actual vs full-period business days
-        │     · Also runs for holiday earnings if applicable
-        │     · Pull additional scheduled earnings (bonuses, commissions)
-        │       from Person_PayData / Company_EarningCodes at standard amounts
-        │
-        │   → PayCalculationInputEarnings { EarningCalculationBasis = HOURLY_RATE, hours, rate }
-        │
-        ├── StartsWith('UnitRate') AND AutoTimesheet_Ind = 1 (Auto-timesheet)
-        │        │
-        │        ▼
-        │   Hours pulled from payroll's own timesheet records
-        │   Rate resolved from Person_PayData
-        │
-        └── StartsWith('UnitRate') AND AutoTimesheet_Ind = 0 (Hourly punch — manual T&A)
-                 │
-                 ▼
-            T&A MTP endpoint  ⚠ cross-team dependency (James action item)
-            GET /v1/employees/{employeeId}/termination-hours?startDate=&endDate=
-            Returns aggregated punch hours by pay code — rate resolved from Person_PayData by Payroll
-```
-
-**Salaried path output:**
-```json
-{ "payCode": "REG", "description": "Regular", "hours": 72.00, "rate": 22.00 }
-```
-
-**Hourly punch path output (from T&A):**
-```json
-{ "payCode": "REG", "hoursWorked": 72.00 },
-{ "payCode": "OT",  "hoursWorked": 6.00  }
-```
-Rate resolved from `Person_PayData` by Payroll — T&A supplies hours only.
+| Type | Source |
+|---|---|
+| Regular / Holiday | `PayPeriodCalculator` — prorated to last day of work |
+| Hourly Punch | T&A MTP endpoint — `GET /v1/employees/{employeeId}/termination-hours?startDate=&endDate=` — hours only, rates resolved from `Person_PayData` |
+| Scheduled Recurring | `RecurringPayRepository.GetScheduledEarningsForEmployeeAsync()` |
 
 ---
 
 ## Appendix B — Deductions Data Source
 
-**Reusable:** `PayrollDeductionQuery` · `IPayrollDeductionQuery`
-
-```sql
-SELECT CDC.Company_DeductionCodeId, CDC.Stub_Description, CDC.CalculationMethod_Cd,
-       CDC.SubjectToFederalTax_Ind, CDC.SubjectToStateTax_Ind,
-       ISNULL(PDD.MonthToDate_Amt, 0) AS MtdAmount, ISNULL(PDD.Maximum_Amt, CDC.Maximum_Amt) AS MaxAmount
-FROM   Person_Main PM
-JOIN   Company_DeductionCodes CDC ON CDC.Company_Cd = PM.Company_Cd
-LEFT JOIN Person_DeductionData PDD ON PDD.Employee_Cd = PM.Employee_Cd
-                                  AND PDD.Deduction_Cd = CDC.Deduction_Cd
-WHERE  PM.Employee_Id = @employeeId
-  AND  CDC.Company_DeductionCodeId = @deductionId
-  AND (PDD.Stop_Dt  IS NULL OR PDD.Stop_Dt  > @checkDate)
-  AND (PDD.Start_Dt IS NULL OR PDD.Start_Dt <= @checkDate)
-```
-
-Called once per deduction ID — the preflight iterates over all active deduction IDs for the employee and calls this query per entry. `StopOnTermination` flag drives auto-toggle-off on the Deductions screen.
+| Type | Source |
+|---|---|
+| Scheduled Recurring | `RecurringPayRepository.GetScheduledDeductionsForEmployeeAsync()` |
+| Display Metadata | `PayrollDeductionQuery` — renders the Deductions screen (amounts, pre/post-tax flag, stop-on-termination toggle) |
 
 ---
 
 ## Appendix C — Accruals Data Source
 
-**Reusable:** `EmployeeAccrualPlanRepository.ListEmployeeAccrualPlansAsync(employeeId)`
+**Source:** `EmployeeAccrualPlanRepository.ListEmployeeAccrualPlansAsync(employeeId)`
 
-```sql
-SELECT CAP.Plan_Desc, PA.CarryOverBalance_Nbr, FUNC.YTDAccrued_Nbr,
-       FUNC.BeginningBalance_Nbr + PA.CarryOverBalance_Nbr + FUNC.YTDAccrued_Nbr - FUNC.YTDTaken_Nbr AS Available
-FROM   Person_Main PM
-JOIN   Person_Accruals PA ON PA.Employee_Cd = PM.Employee_Cd
-JOIN   Company_Accrual_Plans CAP ON CAP.Company_Cd = PM.Company_Cd AND CAP.Plan_ID = PA.Plan_ID
-CROSS APPLY udf_AccrueBalancesTableDisplay(PM.Employee_Cd, CAP.Pay_Cd) FUNC
-WHERE  PM.Employee_Id = @employeeId
-  AND  FUNC.Plan_Id = PA.Plan_Id
-```
+Returns one row per active plan with:
 
-This-period accrual = `annual rate ÷ pay periods per year`, computed server-side.
+| Field | Value |
+|---|---|
+| `PayCode` | Earning code to use for the payout line |
+| `Available` | `BeginningBalance + CarryOverBalance + YTDAccrued - YTDTaken` |
+| `PlanDescription` | Display label |
+
+**Payout amount:** `Available hours × Person_PayrollDemographics.UnitRate_Amt`
+
+> Partial-period accrual (hours earned since the last payroll run) is an open question — see Q2 in clarifications.md.
