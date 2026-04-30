@@ -33,9 +33,6 @@
   - [Completed](#completed)
   - [In Progress](#in-progress)
   - [Pending / External Dependencies](#pending--external-dependencies)
-- [Appendix A — Earnings Data Source](#appendix-a--earnings-data-source)
-- [Appendix B — Deductions Data Source](#appendix-b--deductions-data-source)
-- [Appendix C — Accruals Data Source](#appendix-c--accruals-data-source)
 
 ---
 
@@ -247,8 +244,6 @@ Shown when the active payroll run check returns `200`:
 
 > *"[Name] was found in open Payroll Run #[N] ([periodStart] – [periodEnd]). They have been removed — full earnings through today are included here."*
 
-→ [How earnings data is retrieved](#appendix-a--earnings-data-source)
-
 ---
 
 ### Screen 2: Accruals
@@ -267,8 +262,6 @@ Each active accrual plan is shown as a card:
 
 > Setting payout hours to **0** excludes the plan from the final check.
 
-→ [How accruals data is retrieved](#appendix-c--accruals-data-source)
-
 ---
 
 ### Screen 3: Deductions
@@ -286,8 +279,6 @@ Each active accrual plan is shown as a card:
 > Deductions flagged **Stop on termination** are toggled off automatically and the note is shown in red.
 
 > **Third-party payees:** On-demand payrolls do not generate third-party payments (e.g. garnishments). The UI will display a message informing the admin they are responsible for making these payments directly.
-
-→ [How deductions data is retrieved](#appendix-b--deductions-data-source)
 
 ---
 
@@ -464,7 +455,7 @@ Success state. One card per check generated: single-check = 1 card, two-check = 
 
 #### Scheduled Deductions SP → App Code
 
-Ports the deduction schedule eligibility logic from `usp_CreateRecurringDeductionTransactions` into a read-only in-memory calculation. Deductions are fetched via a Dapper query and filtered in C#; the SP is no longer called.
+Deduction schedule eligibility logic from `usp_CreateRecurringDeductionTransactions` extracted into a read-only in-memory calculation. Deductions are fetched via a Dapper query and filtered in C#.
 
 | File | Role |
 |---|---|
@@ -481,7 +472,7 @@ Ports the deduction schedule eligibility logic from `usp_CreateRecurringDeductio
 
 #### Scheduled Earnings SP → App Code
 
-Ports `usp_CreateRecurringPayTransactions` into a read-only in-memory calculation, following the same pattern as the deductions work above.
+Read-only in-memory calculation based on `usp_CreateRecurringPayTransactions`.
 
 | Target | Detail |
 |---|---|
@@ -493,7 +484,7 @@ Ports `usp_CreateRecurringPayTransactions` into a read-only in-memory calculatio
 
 #### Accrual Logic SP → App Code
 
-Three SPs currently tied to temporary tables must be abstracted to work with in-memory data.
+Three SPs tied to temporary tables, to be ported to in-memory calculations.
 
 | SP | Purpose |
 |---|---|
@@ -508,45 +499,8 @@ Three SPs currently tied to temporary tables must be abstracted to work with in-
 | Item | Owner | Notes |
 |---|---|---|
 | Move to Pay endpoint (`GET /v1/employees/{id}/termination-hours`) | T&A team | Required for hourly earnings calculation |
-| State machine (`Person_Hire.TermPayroll_Status_Cd`) | Payroll API | |
 | Concurrency lock | Payroll API + www | Consult Jeff for prior implementation context |
 | Preflight endpoint | Payroll API | Depends on earnings, accruals, deductions being complete |
 | Calculate endpoint | Payroll API | Depends on preflight |
 | Commit endpoint | Payroll API | Depends on calculate |
 
----
-
-## Appendix A — Earnings Data Source
-
-| Type | Source |
-|---|---|
-| Regular / Holiday | `PayPeriodCalculator`, prorated to last day of work |
-| Hourly Punch | T&A MTP endpoint `GET /v1/employees/{employeeId}/termination-hours?startDate=&endDate=`, hours only; rates resolved from `Person_PayData` |
-| Scheduled Recurring | `RecurringPayRepository.GetScheduledEarningsForEmployeeAsync()` |
-
----
-
-## Appendix B — Deductions Data Source
-
-| Type | Source |
-|---|---|
-| Scheduled Recurring | `DeductionScheduleRepository.GetScheduledDeductionsForEmployeeAsync()` |
-| Display Metadata | `PayrollDeductionQuery`, renders amounts, pre/post-tax flag, and stop-on-termination toggle |
-
----
-
-## Appendix C — Accruals Data Source
-
-**Source:** `EmployeeAccrualPlanRepository.ListEmployeeAccrualPlansAsync(employeeId)`
-
-Returns one row per active plan:
-
-| Field | Value |
-|---|---|
-| `PayCode` | Earning code to use for the payout line |
-| `Available` | `BeginningBalance + CarryOverBalance + YTDAccrued - YTDTaken` |
-| `PlanDescription` | Display label |
-
-**Payout amount:** `Available hours × Person_PayrollDemographics.UnitRate_Amt`
-
-> Partial-period accrual (hours earned since the last payroll run) is an open question — see Q2 in clarifications.md.
