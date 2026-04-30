@@ -474,12 +474,6 @@ Deduction schedule eligibility logic from `usp_CreateRecurringDeductionTransacti
 
 Read-only in-memory calculation based on `usp_CreateRecurringPayTransactions`.
 
-| Target | Detail |
-|---|---|
-| Interface | `IRecurringPayRepository.GetScheduledEarningsForEmployeeAsync()` |
-| Implementation | `RecurringPayRepository` (Dapper query) |
-| Calculator | `RecurringPayCalculator` |
-
 ---
 
 #### Accrual Logic SP → App Code
